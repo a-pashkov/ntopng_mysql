@@ -1,0 +1,12 @@
+{application, ntopng_mysql,
+ [
+  {description, ""},
+  {vsn, "1"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {mod, { ntopng_mysql_app, []}},
+  {env, []}
+ ]}.
