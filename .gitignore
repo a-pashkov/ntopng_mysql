@@ -3,4 +3,4 @@ deps
 *.beam
 apps/ntopng_mysql/ebin/
 rel/ntopng_mysql/
-
+*.swp

@@ -1,0 +1,16 @@
+CREATE TABLE `flows` (
+  `idx` int(11) NOT NULL AUTO_INCREMENT,
+  `NTOP_TIMESTAMP` varchar(256) DEFAULT NULL,
+  `IP_SRC_ADDR` int(10) unsigned DEFAULT NULL,
+  `L4_SRC_PORT` smallint(5) unsigned DEFAULT NULL,
+  `IP_DST_ADDR` int(10) unsigned DEFAULT NULL,
+  `L4_DST_PORT` smallint(5) unsigned DEFAULT NULL,
+  `IN_PACKETS` int(10) unsigned DEFAULT NULL,
+  `IN_BYTES` int(10) unsigned DEFAULT NULL,
+  `OUT_PACKETS` int(10) unsigned DEFAULT NULL,
+  `OUT_BYTES` int(10) unsigned DEFAULT NULL,
+  `FIRST_SWITCHED` int(10) unsigned DEFAULT NULL,
+  `LAST_SWITCHED` int(10) unsigned DEFAULT NULL,
+  `NTOPNG_INSTANCE_NAME` varchar(256) DEFAULT NULL, 
+  KEY `idx` (`idx`,`IP_SRC_ADDR`,`IP_DST_ADDR`,`FIRST_SWITCHED`,`LAST_SWITCHED`, `NTOPNG_INSTANCE_NAME`)
+);

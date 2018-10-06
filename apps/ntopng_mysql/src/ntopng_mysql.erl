@@ -14,22 +14,23 @@
                 lsocket, 
                 socket, 
                 buffer = <<"">>, 
-                data = []
+                data = [], 
+                mysqlpid
                }). 
--record(data, {
-               ntoptimestamp, 
-               srcaddr, 
-               srcport, 
-               dstaddr, 
-               dstport, 
-               inpkts, 
-               inbytes, 
-               outpkts, 
-               outbytes, 
-               firstswitched, 
-               lastswitched,
-               nin
-              }).
+%-record(data, {
+%               ntoptimestamp, 
+%               srcaddr, 
+%               srcport, 
+%               dstaddr, 
+%               dstport, 
+%               inpkts, 
+%               inbytes, 
+%               outpkts, 
+%               outbytes, 
+%               firstswitched, 
+%               lastswitched,
+%               nin
+%              }).
 -define(BUFF_SIZE, 2000). 
 -define(PORT, 5510).
 -define(TIMEOUT, 100).
@@ -40,18 +41,19 @@ start_link()->
 
 init([]) ->
   % Подключение к MySQL
-
+  MysqlSettings = [{host, "localhost"}, {user, "ntopng"}, {password, "qwerty1"}, {database, "ntopng"}], 
+  {ok, MySqlPid} = mysql:start_link(MysqlSettings), 
   % Слушатель
   register(listener, spawn_link(?MODULE, listner_start, [?PORT])), 
-  {ok, #state{}}.
+  {ok, #state{mysqlpid=MySqlPid}}.
 
-handle_cast({data,Packet}, #state{buffer=Buffer,data=Data}=State)-> 
+handle_cast({data,Packet}, #state{buffer=Buffer,data=Data,mysqlpid=MySqlPid}=State)-> 
   [NewBuffer|RcvData] = lists:reverse(binary:split(<<Buffer/binary, Packet/binary>>, <<"\n">>, [global])), 
   NewData = lists:append(RcvData, Data), 
   RestData = case length(NewData) of
     Len when Len >= ?BUFF_SIZE -> 
       {TData,HData} = lists:split(Len-?BUFF_SIZE,  NewData),
-      send(HData),
+      send(HData, MySqlPid),
       TData;
     _Len -> NewData
   end,
@@ -64,8 +66,8 @@ handle_call(Request, From, State) ->
   io:format("handle_call: ~p\n", [{Request, From, State}]),
   {reply, ok, State}.
 
-handle_info(timeout, #state{data=Data}=State)-> 
-  send(Data), 
+handle_info(timeout, #state{data=Data,mysqlpid=MySqlPid}=State)-> 
+  send(Data,MySqlPid), 
   {noreply, State#state{data=[]}};
 handle_info(Info, State) ->
   lager:info("handle_info: ~p\n", [{Info, State}]),
@@ -88,75 +90,75 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal functions
 %% ====================================================================
 
-send(Data)-> 
+send([],_MySqlPid)-> 
+  lager:info("Empty data~n");
+send(Data, MySqlPid)-> 
   lager:info("Send data length: ~p~n", [length(Data)]), 
-  [HData|TData] = Data, 
-  lager:info("Data: ~p~n", [HData]).
+  
+  %lager:info("Data: ~n~p~n", [mysql_format(Data, [])]), 
+  
+  mysql_insert(MySqlPid, mysql_format(Data, [])).
 
-prepare_data(Data)-> 
-  lists:mapfoldl(fun(Elem, Acc)-> 
-    case Elem of 
-     {ok, #data{
-                ntoptimestamp=NtopTimestamp,
-                srcaddr=SrcAddr,
-                srcport=SrcPort,
-                dstaddr=DstAddr,
-                dstport=DstPort,
-                inpkts=InPkts,
-                inbytes=InBytes,
-                outpkts=OutPkts,
-                outbytes=OutBytes,
-                firstswitched=FirstSwitched,
-                lastswitched=LastSwitched,
-                nin=NtopngInstanceName
-               }}-> 
-                 {ok, [[NtopTimestamp,SrcAddr,SrcPort,DstAddr,DstPort,InPkts,InBytes,OutPkts,OutBytes,FirstSwitched,LastSwitched,NtopngInstanceName]|Acc]};
-      _-> 
-        {error, Acc} end end, [], Data).
+extract(Data)-> 
+  try 
+    {Data1} = jiffy:decode(Data), 
+    {_, NtopTimestamp} = lists:keyfind(<<"ntop_timestamp">>, 1, Data1), 
+    {_, SrcAddr} = lists:keyfind(<<"IPV4_SRC_ADDR">>, 1, Data1),
+    {_, SrcPort} = lists:keyfind(<<"L4_SRC_PORT">>, 1, Data1), 
+    {_, DstAddr} = lists:keyfind(<<"IPV4_DST_ADDR">>, 1, Data1), 
+    {_, DstPort} = lists:keyfind(<<"L4_DST_PORT">>, 1, Data1), 
+    {_, InPkts} = lists:keyfind(<<"IN_PKTS">>, 1, Data1), 
+    {_, InBytes} = lists:keyfind(<<"IN_BYTES">>, 1, Data1), 
+    {_, OutPkts} = lists:keyfind(<<"OUT_PKTS">>, 1, Data1), 
+    {_, OutBytes} = lists:keyfind(<<"OUT_BYTES">>, 1, Data1),  
+    {_, FirstSwitched} = lists:keyfind(<<"FIRST_SWITCHED">>, 1, Data1),  
+    {_, LastSwitched} = lists:keyfind(<<"LAST_SWITCHED">>, 1, Data1),  
+    {_, NtopngInstanceName} = lists:keyfind(<<"NTOPNG_INSTANCE_NAME">>, 1, Data1), 
+    {ok, [
+      binary_to_list(<<"'", NtopTimestamp/binary, "'">>),
+      binary_to_list(<<"INET_ATON('", SrcAddr/binary, "')">>), 
+      integer_to_list(SrcPort), 
+      binary_to_list(<<"INET_ATON('", DstAddr/binary, "')">>), 
+      integer_to_list(DstPort), 
+      integer_to_list(InPkts), 
+      integer_to_list(InBytes), 
+      integer_to_list(OutPkts), 
+      integer_to_list(OutBytes), 
+      integer_to_list(FirstSwitched), 
+      integer_to_list(LastSwitched), 
+      binary_to_list(<<"'", NtopngInstanceName/binary, "'">>)]}
+  catch 
+    error:Error-> 
+      lager:info("~p ~p~n", [Error, erlang:get_stacktrace()]), 
+      error
+  end.
 
-bin_to_record(Data)->
-  case catch jiffy:decode(Data) of 
-    {[{<<"ntop_timestamp">>,NtopTimestamp},
-      {<<"IN_SRC_MAC">>,_}, 
-      {<<"OUT_DST_MAC">>,_}, 
-      {<<"IPV4_SRC_ADDR">>,SrcAddr}, 
-      {<<"IPV4_DST_ADDR">>,DstAddr}, 
-      {<<"L4_SRC_PORT">>,SrcPort}, 
-      {<<"L4_DST_PORT">>,DstPort}, 
-      {<<"PROTOCOL">>,_}, 
-      {<<"L7_PROTO">>,_}, 
-      {<<"L7_PROTO_NAME">>,_}, 
-      {<<"IN_PKTS">>,InPkts}, 
-      {<<"IN_BYTES">>,InBytes}, 
-      {<<"OUT_PKTS">>,OutPkts}, 
-      {<<"OUT_BYTES">>,OutBytes}, 
-      {<<"FIRST_SWITCHED">>,FirstSwitched}, 
-      {<<"LAST_SWITCHED">>,LastSwitched}, 
-      {<<"SRC_IP_COUNTRY">>,_}, 
-      {<<"SRC_IP_LOCATION">>,_}, 
-      {<<"DST_IP_COUNTRY">>,_}, 
-      {<<"DST_IP_LOCATION">>,_}, 
-      {<<"NTOPNG_INSTANCE_NAME">>,NtopngInstanceName}, 
-      {<<"INTERFACE">>,_}]}-> 
-        {ok, #data{
-                   ntoptimestamp=binary_to_list(NtopTimestamp),
-                   srcaddr=binary_to_list(SrcAddr),
-                   srcport=integer_to_list(SrcPort),
-                   dstaddr=binary_to_list(DstAddr),
-                   dstport=integer_to_list(DstPort),
-                   inpkts=integer_to_list(InPkts),
-                   inbytes=integer_to_list(InBytes),
-                   outpkts=integer_to_list(OutPkts),
-                   outbytes=integer_to_list(OutBytes),
-                   firstswitched=integer_to_list(FirstSwitched),
-                   lastswitched=integer_to_list(LastSwitched),
-                   nin=binary_to_list(NtopngInstanceName)
-                  }};
-      Msg -> 
-        lager:info("Error: ~p~n", [Msg]),
-        error
-    end.
+mysql_format([], Acc)->
+    string:join(Acc, "),(");
+mysql_format([HData|TData], Acc)->
+  case extract(HData) of
+    {ok, Rec}->
+      mysql_format(TData, [string:join(Rec, ",")|Acc]);
+    _Else->
+      mysql_format(TData, Acc)
+  end.
 
+mysql_insert(MySqlPid, Data)-> 
+  Query = "INSERT INTO flows (
+    NTOP_TIMESTAMP, 
+    IP_SRC_ADDR, 
+    L4_SRC_PORT, 
+    IP_DST_ADDR, 
+    L4_DST_PORT, 
+    IN_PACKETS, 
+    IN_BYTES, 
+    OUT_PACKETS, 
+    OUT_BYTES, 
+    FIRST_SWITCHED, 
+    LAST_SWITCHED, 
+    NTOPNG_INSTANCE_NAME)
+    VALUES (",
+    ok = mysql:query(MySqlPid, Query ++ Data ++ ")").
 
 %% ====================================================================
 %% Listner
