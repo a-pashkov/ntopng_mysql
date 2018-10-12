@@ -13,7 +13,7 @@
 -define(BUFF_SIZE, 2000). 
 -define(TCP_PORT, 5510).
 -define(TIMEOUT, 100).
--define(MYSQL_OPTIONS, [{host, "10.1.116.42"}, {user, "ntopng"}, {password, "qwerty1"}, {database, "ntopng"}]).
+-define(MYSQL_OPTIONS, [{host, "127.0.0.1"}, {user, "ntopng"}, {password, "qwerty1"}, {database, "ntopng"}]).
 -define(TCP_OPTIONS, [binary,{backlog, 128},{active,once},{buffer, 65536},{packet,0},{reuseaddr,true}]).
 
 start_link()->
