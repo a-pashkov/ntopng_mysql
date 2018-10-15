@@ -4,72 +4,64 @@
 -compile(export_all).
 
 -export([start_link/0]).
--export([wait_connection/1]).
 -export([init/1, handle_cast/2, handle_call/3, handle_info/2, terminate/2, code_change/3]).
 
--record(socketstate, {socket, buffer = <<"">>, data = [], timer}).
--record(state, {socketstates=[], mysqlpid}).
+-record(state, {data=[], mysqlpid, timer, socket}).
 
 -define(BUFF_SIZE, 2000). 
--define(TCP_PORT, 5510).
+-define(UDP_PORT, 5510).
 -define(TIMEOUT, 100).
 -define(MYSQL_OPTIONS, [{host, "10.1.116.42"}, {user, "ntopng"}, {password, "qwerty1"}, {database, "ntopng"}]).
--define(TCP_OPTIONS, [binary,{backlog, 128},{active,once},{buffer, 65536},{packet,0},{reuseaddr,true}]).
+-define(UDP_OPTIONS, [binary, {active,true}, {recbuf,124928000}]).
 
-start_link()->
+start_link() ->
   gen_server:start_link({local,?MODULE},?MODULE,[],[]).
 
 init([]) ->
   {ok, MySqlPid} = mysql:start_link(?MYSQL_OPTIONS), 
-  {ok,LSocket} = gen_tcp:listen(?TCP_PORT, ?TCP_OPTIONS), 
-  spawn_link(?MODULE, wait_connection, [LSocket]), 
-  {ok, #state{mysqlpid=MySqlPid}}.
+  {ok,Socket} = gen_udp:open(?UDP_PORT, ?UDP_OPTIONS), 
+  %controlling_process(Socket, self()),
+  {ok, #state{mysqlpid=MySqlPid, socket=Socket}}.
 
-handle_cast({data,Socket,Packet}, #state{socketstates=SocketStates,mysqlpid=MySqlPid}=State)-> 
-  % Ищем сокет
-  NewSocketStates = case lists:keyfind(Socket, #socketstate.socket, SocketStates) of 
-    % Сокета нет (создаём новый и процессим данные)
-    false->
-      [packet_proc(#socketstate{socket=Socket}, Packet, MySqlPid)|SocketStates]; 
-    % Сокет есть (процессим данные)
-    SocketState-> 
-      lists:keyreplace(Socket, #socketstate.socket, SocketStates, packet_proc(SocketState, Packet, MySqlPid)) 
-  end, 
-  {noreply, State#state{socketstates=NewSocketStates}};
-handle_cast({closesocket, Socket}, #state{socketstates=SocketStates}=State)-> 
-  {noreply, State#state{socketstates=lists:keydelete(Socket, #socketstate.socket, SocketStates)}};
 handle_cast(Msg, State) ->
   lager:info("handle_cast: ~p\n", [{Msg, State}]),
-  {noreply, State}.
+  {noreply, State, 0}.
 
 handle_call(Request, From, State) -> 
   lager:info("handle_call: ~p\n", [{Request, From, State}]),
-  {reply, ok, State}.
+  {reply, ok, State, 0}.
 
-handle_info({send,Socket}, #state{socketstates=SocketStates,mysqlpid=MySqlPid}=State)-> 
-  %lager:info("timer~n"), %%%
-  NewSocketStates = case lists:keyfind(Socket, #socketstate.socket, SocketStates) of 
-    % Сокета нет, оставляем как есть
-    false->
-      SocketStates;
-    % Сокет есть - отправляем данные
-    #socketstate{data=Data}=SocketState-> 
-      send(Data, MySqlPid), 
-      lists:keyreplace(Socket, #socketstate.socket, SocketStates, SocketState#socketstate{data=[]}) 
+handle_info({udp, _Socket, _Addr, _Port, Packet}, #state{data=Data, mysqlpid=MySqlPid, timer=Timer}=State)-> 
+  [_|RcvData] = lists:reverse(binary:split(Packet, <<"\n">>, [global])), 
+  NewData = lists:append(RcvData, Data), 
+  RestData = case length(NewData) of
+    Len when Len >= ?BUFF_SIZE -> 
+      NewTimer = start_timer(Timer), 
+      {TData,HData} = lists:split(Len-?BUFF_SIZE,  NewData),
+      send(HData, MySqlPid),
+      TData;
+    _Len -> 
+      NewTimer = Timer, 
+      NewData
   end,
-  {noreply, State#state{socketstates=NewSocketStates}};
+  {noreply, State#state{data=RestData, timer=NewTimer}, ?TIMEOUT};
+handle_info(timeout, #state{data=Data, mysqlpid=MySqlPid, timer=undefined}=State) -> 
+  send(Data, MySqlPid), 
+  {noreply, State#state{data=[]}};
+handle_info(timeout, #state{data=Data, mysqlpid=MySqlPid, timer=Timer}=State) -> 
+  send(Data, MySqlPid), 
+  stop_timer(Timer),
+  {noreply, State#state{data=[], timer=undefined}};
 handle_info(Info, State) ->
   lager:info("handle_info: ~p\n", [{Info, State}]),
-  {noreply, State}.
+  {noreply, State, 0}.
 
-terminate(normal, _State) -> 
-  % Закрыть MySQL
-  % Закрыть сокет  
-  %  gen_udp:close(Socket), 
+terminate(normal, #state{data=Data, mysqlpid=MySqlPid, socket=Socket}) -> 
+  send(Data, MySqlPid), 
+  gen_udp:close(Socket), 
   ok;
 terminate(Reason, State) -> 
   lager:info("terminate: ~p~n", [{Reason, State}]), %% Ненормальное завершение
- %  gen_tcp:close(Socket),
   ok.
 
 code_change(_OldVsn, State, _Extra) ->
@@ -78,40 +70,6 @@ code_change(_OldVsn, State, _Extra) ->
 %% ====================================================================
 %% Internal functions
 %% ====================================================================
-packet_proc(#socketstate{socket=Socket,buffer=Buffer,data=Data,timer=Timer}=SocketState, Packet, MySqlPid)->
-  % Таймер
-  NewTimer = case Timer of 
-    undefined-> 
-      %lager:info("newtimer~n"), %%%
-      erlang:send_after(?TIMEOUT, ?MODULE, {send,Socket});
-    Timer-> 
-      %lager:info("retimer ~p~n", [Timer]), %%%
-      erlang:cancel_timer(Timer), 
-      erlang:send_after(?TIMEOUT, ?MODULE, {send,Socket})
-    end, 
-    %lager:info("newtimer ~p~n", [NewTimer]), %%% 
-
-  % Обработка данных
-  [NewBuffer|RcvData] = lists:reverse(binary:split(<<Buffer/binary, Packet/binary>>, <<"\n">>, [global])), 
-  NewData = lists:append(RcvData, Data), 
-  RestData = case length(NewData) of
-    Len when Len >= ?BUFF_SIZE -> 
-      {TData,HData} = lists:split(Len-?BUFF_SIZE,  NewData),
-      send(HData, MySqlPid),
-      TData;
-    _Len -> NewData
-  end,
-  SocketState#socketstate{buffer=NewBuffer, data=RestData, timer=NewTimer}.
-
-send([],_MySqlPid)-> 
-  lager:info("Empty data~n");
-send(Data, MySqlPid)-> 
-  lager:info("Send data length: ~p~n", [length(Data)]), 
-  
-  %lager:info("Data: ~n~p~n", [mysql_format(Data, [])]), 
-  
-  mysql_insert(MySqlPid, mysql_format(Data, [])).
-
 extract(Data)->
   try
     {Data1} = jiffy:decode(Data), 
@@ -177,28 +135,21 @@ mysql_insert(MySqlPid, Data)->
     VALUES (",
     ok = mysql:query(MySqlPid, Query ++ Data ++ ")").
 
-%% ====================================================================
-%% Listner
-%% ====================================================================
-wait_connection(LSocket)->
-  {ok, Socket} = gen_tcp:accept(LSocket),
-  lager:info("Accept: ~p~n", [Socket]),  
-  Pid = spawn(?MODULE, get_request, [Socket]), 
-  gen_tcp:controlling_process(Socket, Pid), 
-  wait_connection(LSocket).
-  
-get_request(Socket)-> 
-  receive 
-    {tcp, Socket, Packet}-> 
-      inet:setopts(Socket, [{active,once}]), 
-      gen_server:cast(?MODULE, {data, Socket, Packet}); 
-    {tcp_closed, Socket}-> 
-      lager:info("Exit~n"), 
-      gen_tcp:close(Socket), 
-      gen_server:cast(?MODULE, {closesocket, Socket}), 
-      exit(normal);
-    _Msg -> 
-      lager:info("unknown msg: ~p~n", [_Msg])
-  end,
-  get_request(Socket).
+send([],_MySqlPid)->
+  lager:info("Empty data~n");
+send(Data, MySqlPid)->
+  lager:info("Send data length: ~p~n", [length(Data)]),
+  %lager:info("Data: ~n~p~n", [mysql_format(Data, [])]),
+  mysql_insert(MySqlPid, mysql_format(Data, [])).
+
+start_timer(undefined)-> 
+  lager:info("Data transfer started~n",[]), 
+  erlang:now();
+start_timer(Time)-> 
+  Time.
+
+stop_timer(undefined)-> 
+  undefined;
+stop_timer(Time)-> 
+  lager:info("Data transfer took ~p seconds~n", [timer:now_diff(erlang:now(), Time) div 1000000]).
 
