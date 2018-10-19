@@ -73,14 +73,11 @@ code_change(_OldVsn, State, _Extra) ->
 extract(Data)->
   try
     {Data1} = jiffy:decode(Data), 
-    L7Proto = case lists:keyfind(<<"L7_PROTO">>, 1, Data1) of 
-      {_, L7Proto1} -> integer_to_list(L7Proto1);
-      false ->  "NULL" end, 
+    {_, NtopTimestamp} = lists:keyfind(<<"ntop_timestamp">>, 1, Data1), 
     {_, SrcAddr} = lists:keyfind(<<"IPV4_SRC_ADDR">>, 1, Data1), 
     {_, SrcPort} = lists:keyfind(<<"L4_SRC_PORT">>, 1, Data1),   
     {_, DstAddr} = lists:keyfind(<<"IPV4_DST_ADDR">>, 1, Data1),
     {_, DstPort} = lists:keyfind(<<"L4_DST_PORT">>, 1, Data1),
-    {_, Protocol} = lists:keyfind(<<"PROTOCOL">>, 1, Data1), 
     {_, InBytes} = lists:keyfind(<<"IN_BYTES">>, 1, Data1),
     {_, OutBytes} = lists:keyfind(<<"OUT_BYTES">>, 1, Data1),
     {_, InPkts} = lists:keyfind(<<"IN_PKTS">>, 1, Data1),
@@ -88,19 +85,21 @@ extract(Data)->
     {_, FirstSwitched} = lists:keyfind(<<"FIRST_SWITCHED">>, 1, Data1),
     {_, LastSwitched} = lists:keyfind(<<"LAST_SWITCHED">>, 1, Data1),
     {_, NtopngInstanceName} = lists:keyfind(<<"NTOPNG_INSTANCE_NAME">>, 1, Data1),
+    {_, Interface} = lists:keyfind(<<"INTERFACE">>, 1, Data1),
     {ok, [
-      L7Proto, 
+      binary_to_list(<<"'", NtopTimestamp/binary, "'">>), 
       binary_to_list(<<"INET_ATON('", SrcAddr/binary, "')">>),
       integer_to_list(SrcPort),
       binary_to_list(<<"INET_ATON('", DstAddr/binary, "')">>),
       integer_to_list(DstPort),
-      integer_to_list(Protocol), 
+      integer_to_list(InPkts),
       integer_to_list(InBytes),
+      integer_to_list(OutPkts), 
       integer_to_list(OutBytes),
-      integer_to_list(InPkts + OutPkts),
-      integer_to_list(FirstSwitched),
-      integer_to_list(LastSwitched),
-      binary_to_list(<<"'", NtopngInstanceName/binary, "'">>)]} 
+      integer_to_list(FirstSwitched), 
+      integer_to_list(LastSwitched), 
+      binary_to_list(<<"'", NtopngInstanceName/binary, "'">>), 
+      binary_to_list(<<"'", Interface/binary, "'">>)]} 
   catch
     error:Error->
       lager:info("~p ~p~nData:~n~p~n", [Error, erlang:get_stacktrace(), Data]),
@@ -119,19 +118,20 @@ mysql_format([HData|TData], Acc)->
 
 mysql_insert(MySqlPid, Data)-> 
   %lager:info("~p~n", [Data]),
-  Query = "INSERT INTO flowsv4 (
-    L7_PROTO, 
+  Query = "INSERT INTO flows (
+    NTOP_TIMESTAMP, 
     IP_SRC_ADDR, 
     L4_SRC_PORT, 
     IP_DST_ADDR, 
     L4_DST_PORT, 
-    PROTOCOL, 
+    IN_PACKETS,  
     IN_BYTES, 
+    OUT_PACKETS, 
     OUT_BYTES, 
-    PACKETS, 
     FIRST_SWITCHED, 
     LAST_SWITCHED, 
-    NTOPNG_INSTANCE_NAME) 
+    NTOPNG_INSTANCE_NAME, 
+    INTERFACE) 
     VALUES (",
     ok = mysql:query(MySqlPid, Query ++ Data ++ ")").
 
