@@ -24,10 +24,8 @@ start_link() ->
 %% ===================================================================
 
 init([]) ->
-    {ok, { {one_for_one, 5, 10}, [{ntopng_mysql,
-                                    {ntopng_mysql, start_link, []}, 
-                                    permanent, 
-                                    2000, 
-                                    worker, 
-                                    [ntopng_mysql]}]} }.
+  MySqlWriter = ?CHILD(mysql_writer, worker),
+  ListenerUdp = ?CHILD(listener_udp, worker),
+
+  {ok, { {one_for_one, 5, 10}, [MySqlWriter, ListenerUdp]} }.
 
