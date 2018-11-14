@@ -19,7 +19,7 @@
 
 -include("ntopng_mysql.hrl").
 
--record(state, {data=[], mysqlpid, timer, socket}).
+-record(state, {data=[], mysqlpid, timer, wdtime, socket}).
 
 -define(MYSQL_OPTIONS, [{name,{local,mysql}}, 
                         {host, "10.1.116.42"}, 
@@ -33,6 +33,9 @@
 
 -define(UNIX_EPOCH, 62167219200).
 -define(DAY, 86400).
+
+-define(WD_TIMEOUT, 5000000).
+-define(WD_FILE, "watchdog").
 
 %% ====================================================================
 %% API functions
@@ -57,13 +60,14 @@ init([]) ->
   {ok, connected, #state{mysqlpid=MySqlPid}}.
 
 
-connected({add, RcvData}, #state{data=Data}=State) ->
+connected({add, RcvData}, #state{data=Data, wdtime=WDTime}=State) ->
+  NewWDTime = watchdog(WDTime),
   NewData = RcvData ++ Data,
   case length(NewData) >= ?BUFF_SIZE of
     true -> 
-      {next_state, connected, State#state{data=NewData}, 0};
+      {next_state, connected, State#state{data=NewData, wdtime=NewWDTime}, 0};
     _ ->
-      {next_state, connected, State#state{data=NewData}, ?DATA_COLLECT_TIMEOUT}
+      {next_state, connected, State#state{data=NewData, wdtime=NewWDTime}, ?DATA_COLLECT_TIMEOUT}
   end;
 connected(timeout, #state{data=[], timer=Timer}=State) ->
   stop_timer(Timer),
@@ -91,7 +95,8 @@ connected(Event, From, State) ->
   lager:info("Unknown connected sync event ~p from ~p~n", [Event, From]),
   {replay, ok, connected, State, 0}.
 
-disconnected({add, RcvData}, #state{data=Data}=State) ->
+disconnected({add, RcvData}, #state{data=Data, wdtime=WDTime}=State) ->
+  NewWDTime = watchdog(WDTime),
   NewData =  RcvData ++ Data,
   {_TData,HData} = case length(NewData) of
     Len when Len >= ?MAX_STORE_SIZE ->
@@ -100,7 +105,7 @@ disconnected({add, RcvData}, #state{data=Data}=State) ->
     _Len ->
       {[], NewData}
   end,
-  {next_state, disconnected, State#state{data=HData}};
+  {next_state, disconnected, State#state{data=HData, wdtime=NewWDTime}};
 disconnected(Event, State) ->
   lager:info("Unknown disconnected event: ~p~n", [Event]),
   {next_state, disconnected, State}.
@@ -141,11 +146,15 @@ handle_info(Info, StateName, State) ->
   {next_state, StateName, State}.
 
 terminate(normal, StateName, #state{mysqlpid=MySqlPid}) ->
+  file:delete(?WD_FILE),
   process_flag(trap_exit, false),
   exit(MySqlPid, normal), 
   lager:info("Terminate normal. Current state ~p~n", [StateName]),
   {normal};
-terminate(Reason, StateName, _State) ->
+terminate(Reason, StateName, #state{mysqlpid=MySqlPid}) ->
+  file:delete(?WD_FILE),
+  process_flag(trap_exit, false),
+  exit(MySqlPid, normal), 
   lager:info("Unknown terminate reason ~p current state ~p~n", [Reason, StateName]),
   {Reason}.
 
@@ -245,3 +254,16 @@ timestamp_to_localtime(Timestamp) ->
 localtime_to_timestamp(Localtime) -> 
   [Utc] = calendar:local_time_to_universal_time_dst(Localtime),  
   calendar:datetime_to_gregorian_seconds(Utc) - ?UNIX_EPOCH.
+
+watchdog(undefined) -> 
+  ok = file:write_file(?WD_FILE, <<"">>),
+  erlang:now();
+watchdog(Timer) -> 
+  Now = erlang:now(), 
+  case timer:now_diff(Now, Timer) > ?WD_TIMEOUT of 
+    true ->
+      ok = file:write_file(?WD_FILE, <<"">>),
+      Now;
+    false -> 
+      Timer
+  end.

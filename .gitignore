@@ -4,3 +4,4 @@ deps
 apps/ntopng_mysql/ebin/
 rel/ntopng_mysql/
 *.swp
+apps/ntopng_mysql/src/log/
