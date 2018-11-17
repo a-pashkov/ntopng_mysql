@@ -187,7 +187,6 @@ send1([HData|_]=Data) ->
 create_mysql_query(BPeriod, Data) ->
   DataGroups = lists:map(fun(Packet)-> 
     #packet{
-      ntop_timestamp=NtopTimestamp,
       src_addr=SrcAddr,
       src_port=SrcPort,
       dst_addr=DstAddr,
@@ -196,12 +195,9 @@ create_mysql_query(BPeriod, Data) ->
       in_bytes=InBytes,
       out_pkts=OutPkts,
       out_bytes=OutBytes,
-      first_switched=FirstSwitched,
-      last_switched=LastSwitched,
-      ntopng_instance_name=NtopngInstanceName,
-      interface=Interface} = Packet, 
+      last_switched=LastSwitched, 
+      turn=Turn} = Packet, 
     string:join([
-      binary_to_list(<<"'", NtopTimestamp/binary, "'">>), 
       binary_to_list(<<"INET_ATON('", SrcAddr/binary, "')">>), 
       integer_to_list(SrcPort), 
       binary_to_list(<<"INET_ATON('", DstAddr/binary, "')">>),
@@ -210,15 +206,12 @@ create_mysql_query(BPeriod, Data) ->
       integer_to_list(InBytes),
       integer_to_list(OutPkts),
       integer_to_list(OutBytes),
-      integer_to_list(FirstSwitched),
-      integer_to_list(LastSwitched),
-      binary_to_list(<<"'", NtopngInstanceName/binary, "'">>), 
-      binary_to_list(<<"'", Interface/binary, "'">>)], ",") end, Data), 
+      integer_to_list(LastSwitched), 
+      atom_to_list(Turn)], ",") end, Data), 
   DataPart = string:join(DataGroups, "),("), 
   {{Year, Month, Day}, _Time} = timestamp_to_localtime(BPeriod), 
   TableName = lists:flatten(io_lib:format("flows_~4..0w~2..0w~2..0w", [Year, Month, Day])),
   "INSERT INTO " ++ TableName  ++ " (
-    NTOP_TIMESTAMP,
     IP_SRC_ADDR,
     L4_SRC_PORT,
     IP_DST_ADDR,
@@ -227,10 +220,8 @@ create_mysql_query(BPeriod, Data) ->
     IN_BYTES,
     OUT_PACKETS,
     OUT_BYTES,
-    FIRST_SWITCHED,
     LAST_SWITCHED,
-    NTOPNG_INSTANCE_NAME,
-    INTERFACE) VALUES (" ++ DataPart ++ ")".
+    TURN) VALUES (" ++ DataPart ++ ")".
 
 % Time
 start_timer(undefined)-> 

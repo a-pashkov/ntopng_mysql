@@ -7,7 +7,7 @@
 
 -include("ntopng_mysql.hrl").
 
--record(state, {socket}).
+-record(state, {socket, server_ip=[]}).
 
 -define(UDP_PORT, 5510).
 -define(UDP_OPTIONS, [binary, {active,true}, {recbuf,124928000}]).
@@ -17,7 +17,12 @@ start_link() ->
 
 init([]) ->
   {ok,Socket} = gen_udp:open(?UDP_PORT, ?UDP_OPTIONS), 
-  {ok, #state{socket=Socket}}.
+  ServerIP = case application:get_env(server_ip) of 
+    {ok, Value} -> 
+      [list_to_binary(Ip) || Ip <- Value];
+    _ -> []
+  end,
+  {ok, #state{socket=Socket, server_ip=ServerIP}}.
 
 handle_cast(Msg, State) ->
   lager:info("handle_cast: ~p\n", [{Msg, State}]),
@@ -27,9 +32,9 @@ handle_call(Request, From, State) ->
   lager:info("handle_call: ~p\n", [{Request, From, State}]),
   {reply, ok, State}.
 
-handle_info({udp, _Socket, _Addr, _Port, Packet}, State)-> 
+handle_info({udp, _Socket, _Addr, _Port, Packet}, #state{server_ip=ServerIP}=State)-> 
   [_|RcvData] = lists:reverse(binary:split(Packet, <<"\n">>, [global])), 
-  Data = lists:filtermap(fun extract/1, RcvData),
+  Data = lists:filtermap(fun(Data)-> extract(Data, ServerIP) end, RcvData),
   mysql_writer:add_data(Data),
   {noreply, State};
 handle_info(Info, State) ->
@@ -49,10 +54,9 @@ code_change(_OldVsn, State, _Extra) ->
 %% ====================================================================
 %% Internal functions
 %% ====================================================================
-extract(Data)->
+extract(Data, ServerIP)->
   try
     {Data1} = jiffy:decode(Data), 
-    {_, NtopTimestamp} = lists:keyfind(<<"ntop_timestamp">>, 1, Data1), 
     {_, SrcAddr} = lists:keyfind(<<"IPV4_SRC_ADDR">>, 1, Data1), 
     {_, SrcPort} = lists:keyfind(<<"L4_SRC_PORT">>, 1, Data1),   
     {_, DstAddr} = lists:keyfind(<<"IPV4_DST_ADDR">>, 1, Data1),
@@ -61,24 +65,32 @@ extract(Data)->
     {_, OutBytes} = lists:keyfind(<<"OUT_BYTES">>, 1, Data1),
     {_, InPkts} = lists:keyfind(<<"IN_PKTS">>, 1, Data1),
     {_, OutPkts} = lists:keyfind(<<"OUT_PKTS">>, 1, Data1),
-    {_, FirstSwitched} = lists:keyfind(<<"FIRST_SWITCHED">>, 1, Data1),
     {_, LastSwitched} = lists:keyfind(<<"LAST_SWITCHED">>, 1, Data1),
-    {_, NtopngInstanceName} = lists:keyfind(<<"NTOPNG_INSTANCE_NAME">>, 1, Data1),
-    {_, Interface} = lists:keyfind(<<"INTERFACE">>, 1, Data1),
-    {true, #packet{ 
-      ntop_timestamp=NtopTimestamp, 
-      src_addr=SrcAddr,
-      src_port=SrcPort,
-      dst_addr=DstAddr,
-      dst_port=DstPort,
-      in_pkts=InPkts,
-      in_bytes=InBytes,
-      out_pkts=OutPkts, 
-      out_bytes=OutBytes,
-      first_switched=FirstSwitched, 
-      last_switched=LastSwitched, 
-      ntopng_instance_name=NtopngInstanceName, 
-      interface=Interface}} 
+    case lists:member(SrcAddr, ServerIP) of 
+      false -> 
+        {true, #packet{ 
+        src_addr=SrcAddr,
+        src_port=SrcPort,
+        dst_addr=DstAddr,
+        dst_port=DstPort,
+        in_pkts=InPkts,
+        in_bytes=InBytes,
+        out_pkts=OutPkts, 
+        out_bytes=OutBytes,
+        last_switched=LastSwitched}};
+      _ -> 
+        {true, #packet{ 
+        src_addr=DstAddr,
+        src_port=DstPort,
+        dst_addr=SrcAddr,
+        dst_port=SrcPort,
+        in_pkts=OutPkts,
+        in_bytes=OutBytes,
+        out_pkts=InPkts, 
+        out_bytes=InBytes,
+        last_switched=LastSwitched,
+        turn=true}}
+    end
   catch
     error:Error->
       lager:info("~p ~p~nData:~n~p~n", [Error, erlang:get_stacktrace(), Data]),

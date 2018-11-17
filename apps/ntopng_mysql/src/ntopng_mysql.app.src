@@ -10,5 +10,5 @@
                   jiffy
                  ]},
   {mod, { ntopng_mysql_app, []}},
-  {env, []}
+  {env, [{server_ip, ["10.1.116.46","192.168.20.1"]}]}
  ]}.
